@@ -1,13 +1,12 @@
 import requests
 import time
-from colorama import Fore, Style, init
+import curses
+import random
+from threading import Thread, Lock
 from datetime import datetime, timedelta, timezone
 
-# Colorama
-init(autoreset=True)
-
-# edit user id
-user_id = '7340833090'
+# List of user IDs
+user_ids = ['1111111111', '2222222222', '3333333333', '4444444444', '7420569840', '5555555555']  # Add more user IDs here
 
 # Headers
 headers = {
@@ -26,7 +25,12 @@ headers = {
     'user-agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
 }
 
-def userinfo():
+# State management for users
+user_data = {}
+user_colors = {}  # To store the color pairs for each user
+lock = Lock()
+
+def userinfo(user_id):
     api_url = f'https://api.tondrips.com/user/{user_id}'
 
     try:
@@ -35,24 +39,24 @@ def userinfo():
 
         data = response.json()
 
-        # 'user' anahtarının altındaki 'balance' değerini al
+        # Extract balance and last_claim
         balance = data.get('user', {}).get('balance')
-        
-        # 'last_claim' zamanını al ve parse et
         last_claim_str = data.get('user', {}).get('last_claim')
         if last_claim_str:
-            # Offset-aware datetime oluştur
             last_claim_time = datetime.fromisoformat(last_claim_str.replace('Z', '+00:00'))
         else:
             last_claim_time = datetime.now(timezone.utc)
         
-        return balance, last_claim_time
+        with lock:
+            user_data[user_id] = {
+                'balance': balance,
+                'last_claim_time': last_claim_time
+            }
 
     except requests.exceptions.RequestException as e:
-        print(Fore.RED + f"Kullanıcı bilgileri istenirken bir hata oluştu: {e}" + Style.RESET_ALL)
-        return None, None
+        print(f"Error fetching user info for {user_id}: {e}")
 
-def claim():
+def claim(user_id):
     claim_url = f'https://api.tondrips.com/user/claim/{user_id}'
 
     try:
@@ -61,38 +65,66 @@ def claim():
 
         data = response.json()
 
-        # Yanıt mesajını al
+        # Extract message
         message = data.get('message')
         return message
 
     except requests.exceptions.RequestException as e:
-        print(Fore.RED + f"Talepte bulunurken bir hata oluştu: {e}" + Style.RESET_ALL)
+        print(f"Error claiming for {user_id}: {e}")
         return None
 
-if __name__ == '__main__':
-    last_claim_time = datetime.now(timezone.utc)  # Başlangıçta `claim` çağrısının zamanı
-    claim_interval = timedelta(minutes=5)  # 5 dakika
+def setup_curses_colors(stdscr):
+    curses.start_color()
+    # Define color pairs for users
+    for i in range(len(user_ids)):
+        curses.init_pair(i + 1, random.randint(1, 7), curses.COLOR_BLACK) 
+
+def user_thread(user_id, stdscr):
+    claim_interval = timedelta(minutes=5)  # 5 minutes
+    color_pair_id = user_ids.index(user_id) + 1 
 
     while True:
-        balance, last_claim_time = userinfo()
+        userinfo(user_id)
 
+        with lock:
+            user_info = user_data.get(user_id, {})
+            balance = user_info.get('balance')
+            last_claim_time = user_info.get('last_claim_time', datetime.now(timezone.utc))
+        
         if balance is not None:
             current_time = datetime.now(timezone.utc)
 
-            # 5 dakika geçmişse claim fonksiyonunu çağır
             if current_time - last_claim_time >= claim_interval:
-                message = claim()
-                last_claim_time = current_time  # Son `claim` çağrısının zamanını güncelle
-
-            # Kalan süreyi hesapla
-            time_remaining = claim_interval - (current_time - last_claim_time)
-
-            # Ekranı temizle ve güncellenmiş bilgileri yazdır
-            print(Fore.YELLOW + f"\rBalance: {balance}", end='')
-            print(Fore.YELLOW + f" | Next claim in: {int(time_remaining.total_seconds())} seconds", end='')
+                message = claim(user_id)
+                msg = f"User {user_id} claimed: {message}"
+                with lock:
+                    user_data[user_id]['last_claim_time'] = current_time
+                stdscr.addstr(user_ids.index(user_id), 0, msg, curses.color_pair(color_pair_id))
+            else:
+                time_remaining = claim_interval - (current_time - last_claim_time)
+                msg = f"User {user_id} Balance: {balance} | Next claim in: {int(time_remaining.total_seconds())} seconds"
+                stdscr.addstr(user_ids.index(user_id), 0, msg, curses.color_pair(color_pair_id)) 
 
         else:
-            print(Fore.RED + "Balance bilgisi alınamadı", end='')
+            msg = f"User {user_id} Balance info unavailable"
+            stdscr.addstr(user_ids.index(user_id), 0, msg, curses.color_pair(color_pair_id)) 
 
-        # Bekle
-        time.sleep(1)  # 1 saniyede bir döngüyü devam ettir
+        stdscr.refresh()
+        time.sleep(1)
+
+def main(stdscr):
+    curses.curs_set(0)
+    stdscr.clear()
+    setup_curses_colors(stdscr)
+
+    threads = []
+    for user_id in user_ids:
+        thread = Thread(target=user_thread, args=(user_id, stdscr))
+        thread.start()
+        threads.append(thread)
+    
+    for thread in threads:
+        thread.join()
+
+if __name__ == '__main__':
+    curses.wrapper(main)
